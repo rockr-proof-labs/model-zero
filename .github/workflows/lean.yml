@@ -1,0 +1,44 @@
+name: lean
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lean 4.21.0
+        run: |
+          curl -sSfL https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./elan-init -y --default-toolchain leanprover/lean4:v4.21.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Compile (fails on any error)
+        run: lean ModelZero.lean 2>&1 | tee lean.log
+
+      - name: Fail on any sorry
+        run: |
+          if grep -q "declaration uses 'sorry'" lean.log; then
+            echo "::error::A declaration uses sorry"; exit 1
+          fi
+
+      - name: Print axioms for every theorem
+        run: |
+          cp ModelZero.lean audit.lean
+          for t in T1_coin T1_cred T1_no_unauthorised_debit RUIPA_nontransferable T2_issuance T2_evidence \
+                   T3_erasure T4_ledger T4_conservation T4_halt class_integrity porch_requires_verdict \
+                   erased_can_still_transfer grade_is_not_a_gate forfeit_pays_no_one \
+                   contract_immune_to_governance publishShape_moves_nothing far_bid_is_bonded verified_holder; do
+            echo "#print axioms ROCKR.$t" >> audit.lean
+          done
+          lean audit.lean 2>&1 | grep -E "depends on axioms|does not depend" | tee axioms.txt
+
+      - name: Fail on unexpected axioms
+        run: |
+          if grep -E "sorryAx|Classical.choice" axioms.txt; then
+            echo "::error::Unexpected axiom dependency"; exit 1
+          fi
