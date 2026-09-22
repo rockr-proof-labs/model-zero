@@ -1,0 +1,12 @@
+Model Zero
+Copyright 2026 ROCKR Proof Labs Ltd
+
+This product includes work by the following contributors:
+  David Clancy — design, specification and all design rulings; v0.1 and v0.2 (August 2026)
+  Harikeshwaran Palani — closure of the three remaining proof obligations, definition corrections under
+    ruling (Strikes 2–4), core-only list lemmas and the combined invariant; v0.2.1 (September 2026)
+
+Drafting and proof search were AI-assisted (Claude, Anthropic); every proof was checked by the Lean kernel
+and every design decision was ruled by the named human. Per-step provenance notes accompany each version.
+
+Licensed under the Apache License, Version 2.0.
