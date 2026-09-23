@@ -5,11 +5,15 @@ on:
     branches: [ main ]
   pull_request:
 
+defaults:
+  run:
+    shell: bash   # bash -eo pipefail: a failing lean no longer hides behind tee/grep
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Lean 4.21.0
         run: |
@@ -36,6 +40,7 @@ jobs:
             echo "#print axioms ROCKR.$t" >> audit.lean
           done
           lean audit.lean 2>&1 | grep -E "depends on axioms|does not depend" | tee axioms.txt
+          test "$(wc -l < axioms.txt)" -eq 19 || { echo "::error::Expected 19 axiom lines, got $(wc -l < axioms.txt)"; exit 1; }
 
       - name: Fail on unexpected axioms
         run: |
