@@ -72,6 +72,8 @@ v0.2.1 changes (Task 1; each ruled by David before it was made — no silent def
       coin when two roles were the same DID.)
 - D-K  a supplier may not bid on their own experience: `lockRuipa` and `bidMain` require
       e.organiser ≠ b.did.
+- D-L (Strike 4)  `settleGrowth` requires supplier = e.organiser, so the D-K check at bid time
+      cannot be sidestepped at settlement. (A co-host list would be a v0.3 question.)
 - D-C  proved, not added: `verified_holder` (every verified DID is a holder).
 - New proof sections: §11a core-only list lemmas (sums over `eraseDups` from `eraseDups_cons`);
       §11b the invariant `Inv` (five conjuncts) and `Inv_reachable`.
@@ -613,7 +615,8 @@ inductive Step : State → Action → State → Prop where
       (hv : verified s b.did) (hact : s.active b.did = true)   -- R17: verified AND active that week
       (hsup : verified s supplier)
       (henv : ∀ p ∈ env, verified s p.1)
-      (hcon : ∀ p ∈ contractEnv s b.amount, verified s p.1) :
+      (hcon : ∀ p ∈ contractEnv s b.amount, verified s p.1)
+      (horg : supplier = e.organiser) :                                        -- D-L: the supplier is the organiser
       Step s (.settleGrowth e.id b supplier env)
         { s with locks  := s.locks.erase b,
                  bal    := creditAll
