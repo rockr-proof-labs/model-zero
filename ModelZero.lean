@@ -108,6 +108,7 @@ structure Bid where
   fromMain : Bool      -- Standard-Stake Exception: funded from Main
   week     : Nat       -- target week whose allowance is locked (R16)
   bond     : Bool      -- far-horizon bond from Main alongside a RUIPA lock (R17)
+  bondAmount : Coin    -- Strike 2 (D-F): bond value frozen at lock time; 0 when `bond = false`
 deriving DecidableEq, Repr
 
 /-- A signed credential (ticket). Theorem 1 asset (D11). -/
@@ -274,7 +275,7 @@ def sumBal (s : State) : Coin :=
 
 /-- Main coin held in locks: Standard-Stake amounts plus far-horizon bonds. -/
 def lockedMain (s : State) : Coin :=
-  ((s.locks.map (fun b => (if b.fromMain then b.amount else 0) + (if b.bond then b.amount else 0)))).foldl (· + ·) 0
+  ((s.locks.map (fun b => (if b.fromMain then b.amount else 0) + b.bondAmount))).foldl (· + ·) 0
 
 def issuedTotal (s : State) : Coin :=
   (s.issued.map (·.amount)).foldl (· + ·) 0
@@ -476,10 +477,11 @@ inductive Step : State → Action → State → Prop where
       (hhave : s.ruipaUsed b.did b.week + b.amount ≤ s.params.weeklyAllowance)
       (hseats : locksFor s e.id < seatsOpen s e)
       (hbond : b.bond = true ↔ beyondFreeWindow s b.week)
-      (hbondbal : b.bond = true → s.bal b.did ≥ s.params.standardStake) :
+      (hbamt : b.bondAmount = if b.bond then s.params.standardStake else 0)   -- Strike 2b: frozen now
+      (hbondbal : s.bal b.did ≥ b.bondAmount) :                               -- D-G: no lien
       Step s (.lockRuipa b)
         { s with ruipaUsed := updW s.ruipaUsed b.did b.week (s.ruipaUsed b.did b.week + b.amount),
-                 bal := if b.bond then upd s.bal b.did (s.bal b.did - s.params.standardStake) else s.bal,
+                 bal := upd s.bal b.did (s.bal b.did - b.bondAmount),
                  locks := b :: s.locks }
 
   /-- Standard-Stake Exception (whitepaper 8.1 §7.1.2): the target week's allowance exhausted,
@@ -497,7 +499,8 @@ inductive Step : State → Action → State → Prop where
       (hexact : b.amount = s.params.standardStake)
       (hcapw : mainFundedCount s b.did b.week < s.params.mainFundedWeeklyCap)
       (hseats : locksFor s e.id < seatsOpen s e)
-      (hbal : s.bal b.did ≥ b.amount) :
+      (hbal : s.bal b.did ≥ b.amount)
+      (hnobamt : b.bondAmount = 0) :                                          -- Strike 2b
       Step s (.bidMain b)
         { s with bal := upd s.bal b.did (s.bal b.did - b.amount),
                  locks := b :: s.locks }
@@ -511,7 +514,7 @@ inductive Step : State → Action → State → Prop where
                  ruipaUsed := if b.fromMain then s.ruipaUsed
                               else updW s.ruipaUsed b.did b.week (s.ruipaUsed b.did b.week - b.amount),
                  bal := upd s.bal b.did (s.bal b.did + (if b.fromMain then b.amount else 0)
-                                                     + (if b.bond then s.params.standardStake else 0)) }
+                                                     + b.bondAmount) }   -- Strike 2a
 
   /-- The LEAP verdict enters the chain. This is the oracle boundary (H4): the model records
       the verdict; it does not judge it. -/
@@ -539,10 +542,8 @@ inductive Step : State → Action → State → Prop where
       Step s (.forfeit e.id b)
         { s with locks := s.locks.erase b,
                  marks := b.did :: s.marks,
-                 supply := s.supply - ((if b.fromMain then b.amount else 0)
-                                       + (if b.bond then s.params.standardStake else 0)),
-                 retired := s.retired + ((if b.fromMain then b.amount else 0)
-                                        + (if b.bond then s.params.standardStake else 0)) }
+                 supply := s.supply - ((if b.fromMain then b.amount else 0) + b.bondAmount),
+                 retired := s.retired + ((if b.fromMain then b.amount else 0) + b.bondAmount) }
 
   /-- Aggregate availability shape published by an instance under a k-anonymity floor. Moves no
       value; read by no theorem. -/
@@ -595,8 +596,8 @@ inductive Step : State → Action → State → Prop where
                                 then upd s.bal supplier (s.bal supplier + b.amount)
                                 else upd (upd s.bal b.did (s.bal b.did + b.amount))
                                          supplier (s.bal supplier + b.amount)
-                              -- a far-horizon bond returns to its owner on successful settlement
-                              if b.bond then upd bal1 b.did (bal1 b.did + s.params.standardStake) else bal1)
+                              -- a far-horizon bond returns to its owner on successful settlement (Strike 2)
+                              upd bal1 b.did (bal1 b.did + b.bondAmount))
                              (env ++ contractEnv s b.amount),
                  supply := s.supply + (if b.fromMain then 0 else 2 * b.amount)
                            + envTotal (env ++ contractEnv s b.amount),
@@ -720,7 +721,7 @@ def payer : Action → Option DID
   | .transfer src _ _ _ _        => some src
   | .retire p _                  => some p
   | .bidMain b                   => some b.did
-  | .lockRuipa b                 => some b.did      -- debits only when b.bond (R17)
+  | .lockRuipa b                 => some b.did      -- debits b.bondAmount (0 unless b.bond, R17)
   | .settleOrdinary _ p _ _ _ _ _ => some p
   | _                            => none
 
@@ -786,10 +787,7 @@ theorem T1_no_unauthorised_debit (s s' : State) (a : Action) (d : DID)
     simp only [payer]
     by_cases h : d = b.did
     · exact congrArg some h.symm
-    · exfalso
-      by_cases hb : b.bond = true
-      · simp [hb, upd, h] at hdec
-      · simp [hb] at hdec
+    · exfalso; simp [upd, h] at hdec
   | settleOrdinary e payer' payee amt fee feeTo env _ _ _ _ _ _ _ _ _ _ _ =>
     simp only [payer]
     by_cases h : d = payer'
@@ -819,7 +817,7 @@ theorem T1_no_unauthorised_debit (s s' : State) (a : Action) (d : DID)
         (let bal1 := if b.fromMain
             then upd s.bal sup (s.bal sup + b.amount)
             else upd (upd s.bal b.did (s.bal b.did + b.amount)) sup (s.bal sup + b.amount)
-         if b.bond then upd bal1 b.did (bal1 b.did + s.params.standardStake) else bal1) x := by
+         upd bal1 b.did (bal1 b.did + b.bondAmount)) x := by
       intro x
       have hb1 : s.bal x ≤ (if b.fromMain
             then upd s.bal sup (s.bal sup + b.amount)
@@ -835,17 +833,14 @@ theorem T1_no_unauthorised_debit (s s' : State) (a : Action) (d : DID)
           · by_cases h2 : x = b.did
             · subst h2; simp [upd, h1]
             · simp [upd, h1, h2]
-      by_cases hbd : b.bond = true
-      · simp only [hbd, if_true]
-        by_cases h1 : x = b.did
-        · subst h1; simp only [upd, if_true]; exact Nat.le_trans hb1 (Nat.le_add_right _ _)
-        · simp only [upd, h1, if_false]; exact hb1
-      · simp only [hbd, if_false]; exact hb1
+      by_cases h1 : x = b.did
+      · subst h1; simp only [upd, if_true]; exact Nat.le_trans hb1 (Nat.le_add_right _ _)
+      · simp only [upd, h1, if_false]; exact hb1
     have hge := creditAll_ge (env ++ contractEnv s b.amount)
         (let bal1 := if b.fromMain
             then upd s.bal sup (s.bal sup + b.amount)
             else upd (upd s.bal b.did (s.bal b.did + b.amount)) sup (s.bal sup + b.amount)
-         if b.bond then upd bal1 b.did (bal1 b.did + s.params.standardStake) else bal1) d
+         upd bal1 b.did (bal1 b.did + b.bondAmount)) d
     exact absurd (Nat.le_trans (hbase d) hge) (Nat.not_le.mpr hdec)
   | releaseLock b _ _ =>
     exfalso
