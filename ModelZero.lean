@@ -352,7 +352,8 @@ inductive Step : State → Action → State → Prop where
   | renew (s : State) (a : Attestation)
       (hh : s.halted = false)
       (hacc : s.accredited a.issuer = true)
-      (hsig : a.sigOK = true) :
+      (hsig : a.sigOK = true)
+      (hhold : a.subject ∈ s.holders) :     -- Strike 3a-i: a first attestation is `attestIssue` only
       Step s (.renew a)
         { s with attest := fun d => if d = a.subject then a :: s.attest d else s.attest d,
                  resolvable := updB s.resolvable a.subject true }
