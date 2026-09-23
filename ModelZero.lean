@@ -480,7 +480,8 @@ inductive Step : State → Action → State → Prop where
       (hseats : locksFor s e.id < seatsOpen s e)
       (hbond : b.bond = true ↔ beyondFreeWindow s b.week)
       (hbamt : b.bondAmount = if b.bond then s.params.standardStake else 0)   -- Strike 2b: frozen now
-      (hbondbal : s.bal b.did ≥ b.bondAmount) :                               -- D-G: no lien
+      (hbondbal : s.bal b.did ≥ b.bondAmount)                                  -- D-G: no lien
+      (hnotsup : e.organiser ≠ b.did) :                                        -- D-K: no own-event bid
       Step s (.lockRuipa b)
         { s with ruipaUsed := updW s.ruipaUsed b.did b.week (s.ruipaUsed b.did b.week + b.amount),
                  bal := upd s.bal b.did (s.bal b.did - b.bondAmount),
@@ -502,7 +503,8 @@ inductive Step : State → Action → State → Prop where
       (hcapw : mainFundedCount s b.did b.week < s.params.mainFundedWeeklyCap)
       (hseats : locksFor s e.id < seatsOpen s e)
       (hbal : s.bal b.did ≥ b.amount)
-      (hnobamt : b.bondAmount = 0) :                                          -- Strike 2b
+      (hnobamt : b.bondAmount = 0)                                             -- Strike 2b
+      (hnotsup : e.organiser ≠ b.did) :                                        -- D-K: no own-event bid
       Step s (.bidMain b)
         { s with bal := upd s.bal b.did (s.bal b.did - b.amount),
                  locks := b :: s.locks }
@@ -791,12 +793,12 @@ theorem T1_no_unauthorised_debit (s s' : State) (a : Action) (d : DID)
     by_cases h : d = p
     · exact congrArg some h.symm
     · exfalso; simp [upd, h] at hdec
-  | bidMain b _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+  | bidMain b _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
     simp only [payer]
     by_cases h : d = b.did
     · exact congrArg some h.symm
     · exfalso; simp [upd, h] at hdec
-  | lockRuipa b _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+  | lockRuipa b _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
     simp only [payer]
     by_cases h : d = b.did
     · exact congrArg some h.symm
@@ -931,7 +933,7 @@ theorem T2_issuance (g : Genesis) (s s' : State) (a : Action)
 /-- **Theorem 2, sharp form (RP2).** Every unit of increase is matched by issuance records left in `s'`. -/
 theorem T2_evidence (g : Genesis) (s s' : State) (a : Action)
     (hr : Reachable g s) (hs : Step s a s') :
-    s'.supply + s'.retired - (s.supply + s.retired) = issuedTotal s' - issuedTotal s := by
+    s'.supply + s'.retired + issuedTotal s = s.supply + s.retired + issuedTotal s' := by
   sorry
 
 /-- **Theorem 3 (erasure with asset preservation).** Erasure leaves balances, credentials,
