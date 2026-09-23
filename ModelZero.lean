@@ -401,9 +401,10 @@ inductive Step : State → Action → State → Prop where
       (hcap : fee ≤ s.params.feeCap)
       (hbal : s.bal src ≥ amt + fee) :
       Step s (.transfer src dst amt fee feeTo)
-        { s with bal := upd (upd (upd s.bal src (s.bal src - amt - fee))
-                                 dst (s.bal dst + amt))
-                                 feeTo (s.bal feeTo + fee) }
+        { s with bal := -- Strike 3b (Option B): each write reads the balance left by the previous one
+                        let b1 := upd s.bal src (s.bal src - amt - fee)
+                        let b2 := upd b1 dst (b1 dst + amt)
+                        upd b2 feeTo (b2 feeTo + fee) }
 
   /-- Theorem 1 for credentials (D11): holder and recipient both verified. Face-value pricing is
       a policy of the credential's terms, outside Γ. -/
@@ -595,8 +596,8 @@ inductive Step : State → Action → State → Prop where
                  bal    := creditAll
                              (let bal1 := if b.fromMain
                                 then upd s.bal supplier (s.bal supplier + b.amount)
-                                else upd (upd s.bal b.did (s.bal b.did + b.amount))
-                                         supplier (s.bal supplier + b.amount)
+                                else let b0 := upd s.bal b.did (s.bal b.did + b.amount)   -- Strike 3b
+                                     upd b0 supplier (b0 supplier + b.amount)
                               -- a far-horizon bond returns to its owner on successful settlement (Strike 2)
                               upd bal1 b.did (bal1 b.did + b.bondAmount))
                              (env ++ contractEnv s b.amount),
@@ -621,9 +622,9 @@ inductive Step : State → Action → State → Prop where
       (henv : ∀ p ∈ env, verified s p.1)
       (hcon : ∀ p ∈ contractEnv s amt, verified s p.1) :
       Step s (.settleOrdinary e.id payer payee amt fee feeTo env)
-        { s with bal    := creditAll (upd (upd (upd s.bal payer (s.bal payer - amt - fee))
-                                               payee (s.bal payee + amt))
-                                               feeTo (s.bal feeTo + fee))
+        { s with bal    := creditAll (let b1 := upd s.bal payer (s.bal payer - amt - fee)   -- Strike 3b
+                                      let b2 := upd b1 payee (b1 payee + amt)
+                                      upd b2 feeTo (b2 feeTo + fee))
                                      (env ++ contractEnv s amt),
                  supply := s.supply + envTotal (env ++ contractEnv s amt),
                  issued := ((env ++ contractEnv s amt).map
@@ -759,32 +760,43 @@ theorem creditAll_ge (env : Envelope) : ∀ (bal : DID → Coin) (d : DID), bal 
 theorem upd_ne {f : DID → Coin} {d x : DID} {v : Coin} (h : x ≠ d) : upd f d v x = f x := by
   simp [upd, h]
 
+/-- A credit never lowers any balance (v0.2.1 helper for the sequential updates of Strike 3b). -/
+theorem le_upd_self (f : DID → Coin) (x : DID) (c : Coin) (y : DID) : f y ≤ upd f x (f x + c) y := by
+  unfold upd
+  split
+  · rename_i h; subst h; exact Nat.le_add_right _ _
+  · exact Nat.le_refl _
+
+
+
 /-- **Theorem 1, closure / no unauthorised debit (D14 = b).** A DID's Main balance never falls
     unless that DID is the payer of the action. There is no governance freeze-and-return. -/
 theorem T1_no_unauthorised_debit (s s' : State) (a : Action) (d : DID)
     (hs : Step s a s') (hdec : s'.bal d < s.bal d) :
     payer a = some d := by
+  -- v0.2.1: statement unchanged; proof re-done for the sequential updates (Strike 3b) and the
+  -- recorded bond (Strike 2). Every non-payer balance is reached by credits only (`le_upd_self`).
   cases hs with
   | transfer src dst amt fee feeTo _ _ _ _ _ _ =>
     simp only [payer]
-    by_cases h1 : d = feeTo
-    · subst h1; simp only [upd, if_true] at hdec; exact absurd hdec (Nat.not_lt.mpr (Nat.le_add_right _ _))
-    · by_cases h2 : d = dst
-      · subst h2; simp only [upd, h1, if_true, if_false] at hdec; exact absurd hdec (Nat.not_lt.mpr (Nat.le_add_right _ _))
-      · by_cases h3 : d = src
-        · exact congrArg some h3.symm
-        · exfalso; simp [upd, h1, h2, h3] at hdec
+    by_cases h3 : d = src
+    · exact congrArg some h3.symm
+    · exfalso
+      have h1 : s.bal d ≤ upd s.bal src (s.bal src - amt - fee) d := by rw [upd_ne h3]; exact Nat.le_refl _
+      have h2 := le_upd_self (upd s.bal src (s.bal src - amt - fee)) dst amt d
+      have h4 := le_upd_self (let b1 := upd s.bal src (s.bal src - amt - fee); upd b1 dst (b1 dst + amt)) feeTo fee d
+      exact absurd (Nat.le_trans (Nat.le_trans h1 h2) h4) (Nat.not_le.mpr hdec)
   | retire p amt _ _ _ _ =>
     simp only [payer]
     by_cases h : d = p
     · exact congrArg some h.symm
     · exfalso; simp [upd, h] at hdec
-  | bidMain b _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+  | bidMain b _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
     simp only [payer]
     by_cases h : d = b.did
     · exact congrArg some h.symm
     · exfalso; simp [upd, h] at hdec
-  | lockRuipa b _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
+  | lockRuipa b _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ =>
     simp only [payer]
     by_cases h : d = b.did
     · exact congrArg some h.symm
@@ -794,55 +806,40 @@ theorem T1_no_unauthorised_debit (s s' : State) (a : Action) (d : DID)
     by_cases h : d = payer'
     · exact congrArg some h.symm
     · exfalso
+      have h1 : s.bal d ≤ upd s.bal payer' (s.bal payer' - amt - fee) d := by rw [upd_ne h]; exact Nat.le_refl _
+      have h2 := le_upd_self (upd s.bal payer' (s.bal payer' - amt - fee)) payee amt d
+      have h4 := le_upd_self (let b1 := upd s.bal payer' (s.bal payer' - amt - fee); upd b1 payee (b1 payee + amt)) feeTo fee d
       have hge := creditAll_ge (env ++ contractEnv s amt)
-        (upd (upd (upd s.bal payer' (s.bal payer' - amt - fee)) payee (s.bal payee + amt)) feeTo (s.bal feeTo + fee)) d
-      have hbase : s.bal d ≤ upd (upd (upd s.bal payer' (s.bal payer' - amt - fee)) payee (s.bal payee + amt)) feeTo (s.bal feeTo + fee) d := by
-        by_cases h1 : d = feeTo
-        · subst h1; simp [upd]
-        · by_cases h2 : d = payee
-          · subst h2; simp [upd, h1]
-          · simp [upd, h1, h2, h]
-      exact absurd (Nat.le_trans hbase hge) (Nat.not_le.mpr hdec)
+        (let b1 := upd s.bal payer' (s.bal payer' - amt - fee)
+         let b2 := upd b1 payee (b1 payee + amt)
+         upd b2 feeTo (b2 feeTo + fee)) d
+      exact absurd (Nat.le_trans (Nat.le_trans (Nat.le_trans h1 h2) h4) hge) (Nat.not_le.mpr hdec)
   | settleSeeding e d' env _ _ _ _ _ _ _ _ _ _ =>
     exfalso
     have hge := creditAll_ge (env ++ contractEnv s s.params.standardStake) (upd s.bal d' (s.bal d' + s.params.standardStake)) d
-    have hbase : s.bal d ≤ upd s.bal d' (s.bal d' + s.params.standardStake) d := by
-      by_cases h : d = d'
-      · subst h; simp [upd]
-      · simp [upd, h]
+    have hbase := le_upd_self s.bal d' s.params.standardStake d
     exact absurd (Nat.le_trans hbase hge) (Nat.not_le.mpr hdec)
   | settleGrowth e b sup env _ _ _ _ _ _ _ _ _ _ _ _ =>
     exfalso
-    -- the base balance is a chain of credits only
-    have hbase : ∀ x, s.bal x ≤
-        (let bal1 := if b.fromMain
-            then upd s.bal sup (s.bal sup + b.amount)
-            else upd (upd s.bal b.did (s.bal b.did + b.amount)) sup (s.bal sup + b.amount)
-         upd bal1 b.did (bal1 b.did + b.bondAmount)) x := by
-      intro x
-      have hb1 : s.bal x ≤ (if b.fromMain
-            then upd s.bal sup (s.bal sup + b.amount)
-            else upd (upd s.bal b.did (s.bal b.did + b.amount)) sup (s.bal sup + b.amount)) x := by
-        by_cases hm : b.fromMain = true
-        · simp only [hm, if_true]
-          by_cases h1 : x = sup
-          · subst h1; simp [upd]
-          · simp [upd, h1]
-        · simp only [hm, if_false]
-          by_cases h1 : x = sup
-          · subst h1; simp [upd]
-          · by_cases h2 : x = b.did
-            · subst h2; simp [upd, h1]
-            · simp [upd, h1, h2]
-      by_cases h1 : x = b.did
-      · subst h1; simp only [upd, if_true]; exact Nat.le_trans hb1 (Nat.le_add_right _ _)
-      · simp only [upd, h1, if_false]; exact hb1
+    have hb1 : s.bal d ≤ (if b.fromMain
+          then upd s.bal sup (s.bal sup + b.amount)
+          else let b0 := upd s.bal b.did (s.bal b.did + b.amount)
+               upd b0 sup (b0 sup + b.amount)) d := by
+      cases b.fromMain
+      · exact Nat.le_trans (le_upd_self s.bal b.did b.amount d)
+          (le_upd_self (upd s.bal b.did (s.bal b.did + b.amount)) sup b.amount d)
+      · exact le_upd_self s.bal sup b.amount d
+    have hb2 := le_upd_self (if b.fromMain
+          then upd s.bal sup (s.bal sup + b.amount)
+          else let b0 := upd s.bal b.did (s.bal b.did + b.amount)
+               upd b0 sup (b0 sup + b.amount)) b.did b.bondAmount d
     have hge := creditAll_ge (env ++ contractEnv s b.amount)
         (let bal1 := if b.fromMain
             then upd s.bal sup (s.bal sup + b.amount)
-            else upd (upd s.bal b.did (s.bal b.did + b.amount)) sup (s.bal sup + b.amount)
+            else let b0 := upd s.bal b.did (s.bal b.did + b.amount)
+                 upd b0 sup (b0 sup + b.amount)
          upd bal1 b.did (bal1 b.did + b.bondAmount)) d
-    exact absurd (Nat.le_trans (hbase d) hge) (Nat.not_le.mpr hdec)
+    exact absurd (Nat.le_trans (Nat.le_trans hb1 hb2) hge) (Nat.not_le.mpr hdec)
   | releaseLock b _ _ =>
     exfalso
     by_cases h : d = b.did
