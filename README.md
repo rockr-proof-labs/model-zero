@@ -28,7 +28,7 @@ Append `#print axioms ROCKR.<theorem>` for any theorem to see its dependencies. 
 
 ## Companion documents
 
-The English read-back (the model explained sentence by sentence), the change notes, and the Problem Book are at [rockrprooflabs.org](https://rockrprooflabs.org). The economic design the model formalises is the ROCKRCOIN whitepaper (v8.2), also linked there.
+The Problem Book page for RP1, the attested-authorisation checker, is in this repository at [`docs/problem-book/`](docs/problem-book/) — current version v1.2 (2 October 2026), with v1.1 preserved. The English read-back (the model explained sentence by sentence) and the change notes are at [rockrprooflabs.org](https://rockrprooflabs.org). The economic design the model formalises is the ROCKRCOIN whitepaper (v8.2), also linked there.
 
 ## Contributing
 
