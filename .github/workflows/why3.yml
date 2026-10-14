@@ -1,0 +1,100 @@
+# .github/workflows/why3.yml
+#
+# Task 2 CI for checker/why3/.
+#
+# Ubuntu's packaged Why3 (1.6.0) with Z3 — the cheap route, about a minute,
+# no opam switch to build. The result OF RECORD in the provenance note is
+# Why3 1.8.2 with Alt-Ergo 2.6.4; this job is the independent reproduction.
+#
+# The job is named `why3` (not `check`) so it can be made required alongside
+# the Lean check.
+#
+# Unlike the Lean workflow, this one asserts COUNTS rather than "no sorry":
+#   checker.mlw       14 obligations, 13 must discharge.
+#                     wf_reachable is an induction over `reachable`; no SMT
+#                     solver closes it, and it is recorded as open.
+#                     P2 is not an obligation here (ruling D-N, issue #2).
+#   checker_test.mlw  every goal must be Valid.
+#   p2_probe.mlw      must stay Valid: it records that P2 as first stated is
+#                     vacuous (issue #2). If it ever stops discharging, the
+#                     finding has changed and the note needs revisiting.
+
+name: why3
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  why3:
+    name: why3
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: checker/why3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Why3 and Z3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends why3 z3
+          why3 --version
+          z3 --version
+
+      - name: Detect provers
+        run: why3 config detect
+
+      - name: Type-check
+        run: |
+          why3 prove checker.mlw      > /dev/null
+          why3 prove checker_test.mlw > /dev/null
+          why3 prove p2_probe.mlw     > /dev/null
+
+      - name: checker.mlw — 13 of 14 obligations discharge
+        run: |
+          why3 prove -P z3 -t 10 checker.mlw | tee checker.out
+          valid=$(grep -c 'Valid' checker.out || true)
+          echo "Valid: $valid (expected 13)"
+          if [ "$valid" -ne 13 ]; then
+            echo "::error::checker.mlw: expected 13 Valid, got $valid"
+            exit 1
+          fi
+          if ! grep -q 'Goal wf_reachable' checker.out; then
+            echo "::error::wf_reachable not reported — did the file change?"
+            exit 1
+          fi
+
+      - name: checker_test.mlw — every goal Valid
+        run: |
+          why3 prove -P z3 -t 10 checker_test.mlw | tee test.out
+          valid=$(grep -c 'Valid' test.out || true)
+          total=$(grep -c '^Goal ' test.out || true)
+          echo "Valid: $valid of $total"
+          if [ "$total" -eq 0 ] || [ "$valid" -ne "$total" ]; then
+            echo "::error::checker_test.mlw: $valid Valid of $total goals"
+            exit 1
+          fi
+
+      - name: p2_probe.mlw — the vacuity probe still discharges (issue #2)
+        run: |
+          why3 prove -P z3 -t 10 p2_probe.mlw | tee probe.out
+          valid=$(grep -c 'Valid' probe.out || true)
+          echo "Valid: $valid"
+          if [ "$valid" -lt 1 ]; then
+            echo "::error::P2 vacuity probe no longer discharges — see issue #2"
+            exit 1
+          fi
+
+      - name: Save the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: why3-report
+          path: |
+            checker/why3/checker.out
+            checker/why3/test.out
+            checker/why3/probe.out

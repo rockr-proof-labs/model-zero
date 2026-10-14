@@ -1,0 +1,427 @@
+(* ============================================================================
+   checker.mlw — the attested-authorisation checker, stated in Why3
+
+   Task 2, ROCKR Preuves. States the object of Problem Book RP1 v1.2 §1-§3:
+   the inputs, the decision predicate C(pi, S_h), and the properties, over an
+   abstract step relation.
+
+   14 obligations. 13 discharge under Why3 1.8.2 with Alt-Ergo 2.6.4 and
+   independently under Why3 1.6.0 with Z3. `wf_reachable` is an induction over
+   `reachable` and no SMT solver will close it. P2 is NOT an obligation here:
+   see the comment block in §8 and issue #2 (ruling D-N).
+
+   Rulings carried in (David Clancy, 1-2 October 2026):
+     D-N  P2 is not statable in this framework; kept as a comment, not a goal.
+     D7   expiry is DERIVED from the register and tau, not stored; `Expire`
+          ceases to be a move; condition 2 becomes time-dependent.
+     D8   the freshness policy is read at CHECK height — deliberately the
+          opposite of Model Zero's D-F: a bond is the bidder's commitment and
+          is frozen to protect the bidder; the window is the chain's defence
+          and must not be frozen by the attacker's timing.
+     D9   k >= 1, stated in Problem Book §1 and kept in `wf`.
+     Q2   "revocation always wins within a height" is enforced at block
+          construction, not in C; within-block ordering stays unmodelled.
+     Q3   the rotation/slashing distinction is accepted in principle and the
+          state-model change is deferred to the December interface.
+     D-M  Why3 standard library permitted; no external Why3 libraries;
+          toolchain and prover versions pinned.
+
+   Correspondence with Model Zero v0.2.1 (Lean 4.21.0) is in the companion
+   note; each symbol carries a (PB §x) or (MZ name) tag.
+
+   Author: Harikeshwaran Palani. Reviewer: David Clancy.
+   Written with AI assistance (Claude); every definition checked by me against
+   the Problem Book and Model Zero.
+   ============================================================================ *)
+
+module Checker
+
+  use int.Int
+  use bool.Bool
+  use set.Fset          (* mem, subset, cardinal — attester sets *)
+
+  (* --------------------------------------------------------------------- *)
+  (* 1. Identifiers                                                         *)
+  (* --------------------------------------------------------------------- *)
+
+  (* p: an on-chain identifier. PB §1 — no personal data enters the checker.
+     MZ: DID. *)
+  type principal
+
+  (* e: an authenticated event. MZ: ExpId / Experience. *)
+  type event
+
+  (* An attester. MZ: the accredited instances of H3. *)
+  type attester
+
+  (* A chain height h. Consensus gives a single ordered log (H2). *)
+  type height = int
+
+  (* Attester-time t and block time tau_h. Distinct clocks on purpose: Q1 is
+     precisely about their disagreement. *)
+  type atime  = int
+  type btime  = int
+
+  (* --------------------------------------------------------------------- *)
+  (* 2. The presence attestation pi = <p, e, t, Sigma>   (PB §1, input 1)   *)
+  (* --------------------------------------------------------------------- *)
+
+  type presence = {
+    subject   : principal;
+    ev        : event;
+    signed_at : atime;
+    sigma     : fset attester;   (* a SET: no attester counts twice toward k *)
+  }
+
+  (* --------------------------------------------------------------------- *)
+  (* 3. Credential status                            (PB §1, input 2)       *)
+  (* --------------------------------------------------------------------- *)
+
+  (* D7 (ruled 2 October 2026): expiry is DERIVED, as Model Zero does it.
+     What the register stores is the revocation flag and the credential's
+     expiry date; `Expired` is then a reading of that record against the
+     block clock, not a state anyone writes. MZ's `verified` requires
+     `s.time < a.expires` and has no Expired state at all; this now matches.
+     Consequence: condition 2 is time-dependent, so a credential can expire
+     between signing and checking — which is the Q1 interaction. *)
+  type status = Live | Revoked | Expired
+
+  type credential = {
+    is_revoked : bool;
+    expires    : btime;      (* live while tau < expires *)
+  }
+
+  (* --------------------------------------------------------------------- *)
+  (* 4. The freshness policy and the committed chain state                  *)
+  (* --------------------------------------------------------------------- *)
+
+  (* (Delta, epsilon): how far behind or ahead of block time an attester-time
+     may lie. PB §1, input 4. *)
+  type policy = { delta : int; eps : int }
+
+  (* S_h. PB §1 writes the decision predicate as C(pi, S_h): the policy is NOT
+     a parameter of C, it is part of the committed configuration, so it is a
+     FIELD here rather than an argument. That also makes P1 statable: with
+     `pol` free, "a release happened" would give the conditions for SOME
+     policy while P1 claims them for EVERY policy, and P1 would be false. *)
+  type state = {
+    h           : height;                          (* the height of S_h *)
+    cred        : principal -> credential;         (* R_h: the register *)
+    att_set     : event -> fset attester;          (* Att(e) as recorded in S_h *)
+    threshold   : event -> int;                    (* k for the event *)
+    tau         : btime;                           (* tau_h, the block time *)
+    released    : principal -> event -> bool;      (* the release history *)
+    pol         : policy;                          (* (Delta, epsilon) *)
+  }
+
+  (* The three-valued status of PB §1, read rather than stored (D7). *)
+  function status_of (s : state) (p : principal) : status =
+    let c = s.cred p in
+    if c.is_revoked = True then Revoked
+    else if c.expires <= s.tau then Expired
+    else Live
+
+  (* Well-formedness. PB §2 gives the adversary "fewer than k attesters for
+     any event", which is vacuous at k = 0; and at k = 0 an EMPTY signing set
+     satisfies `cardinal >= k`, so an unsigned note would release. k >= 1 is
+     therefore assumed, not derived (D9). Delta and epsilon are non-negative
+     for the freshness window to be an interval containing tau. *)
+  predicate wf (s : state) =
+    (forall e : event. s.threshold e >= 1)
+    /\ s.pol.delta >= 0 /\ s.pol.eps >= 0
+
+  (* --------------------------------------------------------------------- *)
+  (* 5. The signature hypothesis                     (PB §4, H1)            *)
+  (* --------------------------------------------------------------------- *)
+
+  (* Signature validity is NOT modelled; it is inherited as a hypothesis, as
+     in Model Zero (sigOK). `signs a pi` reads: attester a's signature over
+     <p, e, t> verifies. The adversary cannot forge it (PB §2). *)
+  predicate signs attester presence
+
+  (* --------------------------------------------------------------------- *)
+  (* 6. The five conditions of C(pi, S_h)            (PB §1)                *)
+  (* --------------------------------------------------------------------- *)
+
+  (* C1: Sigma is a valid k-of-n signature set over <p,e,t> from Att(e) as
+     recorded in S_h. NOTE (Q3): "as recorded in S_h" is read as the set at
+     CHECK height h. The rotation/slashing distinction is accepted in
+     principle and deferred to the December interface. *)
+  predicate c1_signatures (s : state) (pi : presence) =
+    subset pi.sigma (s.att_set pi.ev)
+    /\ cardinal pi.sigma >= s.threshold pi.ev
+    /\ forall a : attester. mem a pi.sigma -> signs a pi
+
+  (* C2: A(p) is live in R_h — now a reading of the register against the
+     block clock (D7), not a stored field. *)
+  predicate c2_live (s : state) (pi : presence) =
+    status_of s pi.subject = Live
+
+  (* C3: tau_h - Delta <= t <= tau_h + epsilon, against the policy committed
+     in S_h and read at check height (D8). *)
+  predicate c3_fresh (s : state) (pi : presence) =
+    s.tau - s.pol.delta <= pi.signed_at /\ pi.signed_at <= s.tau + s.pol.eps
+
+  (* C4: no release for (p, e) is recorded in S_h (single use). Keyed on
+     <p, e>, as PB §1 states. This, not C3, is what defeats replay. *)
+  predicate c4_unused (s : state) (pi : presence) =
+    s.released pi.subject pi.ev = False
+
+  (* C5: the credited account is p's and no other. The credited account is a
+     parameter of the release, so C5 is a condition on the move, not on S_h.
+     Q6b (ruled): P4 is about the IMMEDIATE credit. *)
+  predicate c5_credit (pi : presence) (q : principal) =
+    q = pi.subject
+
+  (* C(pi, S_h) itself, named `decide` because `check` is a WhyML keyword.
+     PB §1: "Nothing else is consulted." *)
+  predicate decide (s : state) (pi : presence) (q : principal) =
+    c1_signatures s pi
+    /\ c2_live s pi
+    /\ c3_fresh s pi
+    /\ c4_unused s pi
+    /\ c5_credit pi q
+
+  (* --------------------------------------------------------------------- *)
+  (* 7. How the chain moves                                                 *)
+  (* --------------------------------------------------------------------- *)
+
+  (* Only the moves the checker can see. Everything else in Model Zero's 29
+     constructors is invisible to it and is omitted deliberately.
+     D7: there is no `Expire` move. A credential expires by the clock passing
+     its expiry date, which is `Advance`, not an act of governance. *)
+  type action =
+    | Revoke    principal             (* a credential is revoked *)
+    | Rotate    event (fset attester) (* Att(e) changes (Q3) *)
+    | SetPolicy policy                (* governance changes (Delta, epsilon) *)
+    | Advance   btime                 (* the next block: h+1, new tau *)
+    | Release   presence principal    (* escrow for (p,e) settles to account q *)
+
+  (* Heights advance only through `Advance`, so several moves may share a
+     height. Q2 (ruled): "revocation always wins within a height" is enforced
+     at block construction, not in C, so within-block ordering stays
+     unmodelled here by ruling rather than by omission. *)
+  inductive step state action state =
+
+    | step_revoke :
+        forall s : state, p : principal.
+          step s (Revoke p)
+            { s with cred = (fun x -> if x = p
+                                      then { (s.cred p) with is_revoked = True }
+                                      else s.cred x) }
+
+    | step_rotate :
+        forall s : state, e : event, newset : fset attester.
+          step s (Rotate e newset)
+            { s with att_set = (fun x -> if x = e then newset else s.att_set x) }
+
+    (* D8: governance may retune the window, and the decision reads the policy
+       in force at check height. The liveness cost is named in the P2 block. *)
+    | step_setpolicy :
+        forall s : state, p : policy.
+          p.delta >= 0 -> p.eps >= 0 ->
+          step s (SetPolicy p) { s with pol = p }
+
+    (* The clock advancing is also what expires credentials (D7). *)
+    | step_advance :
+        forall s : state, t : btime.
+          t >= s.tau ->
+          step s (Advance t) { s with h = s.h + 1; tau = t }
+
+    (* The release move. Its guard IS the decision predicate: the single point
+       where the checker's answer is used. *)
+    | step_release :
+        forall s : state, pi : presence, q : principal.
+          decide s pi q ->
+          step s (Release pi q)
+            { s with released = (fun x y ->
+                       if x = pi.subject then
+                         (if y = pi.ev then True else s.released x y)
+                       else s.released x y) }
+
+  predicate initial (s : state) =
+    wf s
+    /\ s.h >= 0
+    /\ (forall p : principal, e : event. s.released p e = False)
+
+  inductive reachable state =
+    | reach_init : forall s : state. initial s -> reachable s
+    | reach_step : forall s s' : state, a : action.
+        reachable s -> step s a s' -> reachable s'
+
+  (* Well-formedness survives every move: no move lowers a threshold, and
+     `SetPolicy` is guarded. *)
+  goal wf_preserved :
+    forall s s' : state, a : action.
+      wf s -> step s a s' -> wf s'
+
+  (* Induction over `reachable`. No SMT solver closes this; see §6 of the
+     correspondence note. *)
+  lemma wf_reachable :
+    forall s : state. reachable s -> wf s
+
+  (* --------------------------------------------------------------------- *)
+  (* 8. The properties                               (PB §3)                *)
+  (* --------------------------------------------------------------------- *)
+
+  (* P1 SOUNDNESS. A release move can only occur where the five conditions
+     held in the state it was taken from. *)
+  goal P1_soundness :
+    forall s s' : state, pi : presence, q : principal.
+      reachable s ->
+      step s (Release pi q) s' ->
+      c1_signatures s pi
+      /\ c2_live s pi
+      /\ c3_fresh s pi
+      /\ c4_unused s pi
+      /\ c5_credit pi q
+
+  (* Corollary: no revoked credential ever releases value. Under D7 this also
+     covers `expired`, since both fail C2. *)
+  goal P1_corollary_no_revoked_release :
+    forall s s' : state, pi : presence, q : principal.
+      reachable s ->
+      step s (Release pi q) s' ->
+      status_of s pi.subject <> Revoked
+
+  (* Corollary: no replayed evidence ever releases value. PB §3 lists this
+     under soundness; it is condition 4, not condition 3, that carries it —
+     a replay one second later is perfectly fresh. *)
+  goal P1_corollary_no_replay :
+    forall s s' s'' : state, pi : presence, q q' : principal.
+      reachable s ->
+      step s (Release pi q) s' ->
+      reachable s'' ->
+      (forall x : principal, y : event.
+         s'.released x y = True -> s''.released x y = True) ->
+      not (exists s''' : state. step s'' (Release pi q') s''')
+
+  (* ======================================================================
+     P2 LIVENESS — NOT AN OBLIGATION IN THIS FILE.   Ruling D-N, issue #2.
+
+     The statement as I first wrote it, verbatim:
+
+       predicate submitted presence principal height
+       function bound : int
+
+       goal P2_liveness :
+         forall s0 : state, pi : presence, q : principal, h0 : height.
+           reachable s0 ->
+           s0.h = h0 ->
+           submitted pi q h0 ->
+           decide s0 pi q ->
+           (forall s : state. reachable s -> s.h >= h0 -> s.h <= h0 + bound ->
+              s.cred pi.subject = Live /\ s.pol = s0.pol) ->
+           exists s s' : state.
+             reachable s /\ s.h <= h0 + bound /\ step s (Release pi q) s'
+
+     Three things are wrong with it, and the third is fatal.
+
+     (i)  IT IS VACUOUS, not merely open. Add the single hypothesis
+          bound >= 0 and it discharges in hundredths of a second, because s0
+          is its own witness: `reachable s0` is given, `s0.h = h0 <= h0 +
+          bound` holds, and `decide s0 pi q` gives `step_release` directly.
+          It therefore follows from its own antecedent. Found by David
+          Clancy, 2 October 2026; probe recorded in §6 of the correspondence
+          note.
+
+     (ii) IT SAYS THE WRONG THING. "There exists a reachable state in the
+          window from which a release step is possible" is not "a release
+          occurs". Possibility is not eventuality.
+
+     (iii) IT CANNOT BE SAID HERE AT ALL. `reachable` is a set of STATES.
+          "Eventually" is a property of EXECUTIONS — sequences of steps. No
+          predicate over a set of states can express it, with or without
+          `submitted` and `bound`. The framework, not the wording, is the
+          obstacle.
+
+     This sharpens rather than contradicts the argument in D5 and Q4:
+     liveness needs executions AND a delivery hypothesis on the execution,
+     and neither this file nor Model Zero has executions.
+
+     The formal statement is deferred to the December interface: over
+     executions, under a delivery hypothesis H5 inherited from CometBFT's
+     partial-synchrony guarantee, with the bound B measured on the testnet.
+
+     Do not try to close it. See issue #2.
+     ====================================================================== *)
+
+  (* P3 REVOCATION-ATOMICITY. The decision at height h is a function of R_h
+     alone. Stated as indistinguishability: two reachable states at the same
+     height that agree on everything the checker reads give the same
+     decision. *)
+  goal P3_decision_depends_only_on_R :
+    forall s1 s2 : state, pi : presence, q : principal.
+      reachable s1 -> reachable s2 ->
+      s1.h = s2.h ->
+      (forall p : principal. s1.cred p = s2.cred p) ->
+      s1.att_set = s2.att_set -> s1.threshold = s2.threshold ->
+      s1.tau = s2.tau -> s1.released = s2.released -> s1.pol = s2.pol ->
+      (decide s1 pi q <-> decide s2 pi q)
+
+  (* The other half of P3: a revocation committed at h' <= h MUST influence
+     the decision — no read/act interval. *)
+  goal P3_revocation_takes_effect :
+    forall s s' s'' : state, p : principal, pi : presence, q : principal.
+      reachable s ->
+      step s (Revoke p) s' ->
+      reachable s'' -> s''.h >= s'.h ->
+      (forall x : principal. s''.cred x = s'.cred x) ->
+      pi.subject = p ->
+      not (decide s'' pi q)
+
+  (* P4 NON-TRANSFERABILITY. Every release credits exactly p. Q6b (ruled):
+     this is about the immediate credit; every account that can receive a
+     release is an attested DID with a single identified beneficial owner
+     (whitepaper §5.3). *)
+  goal P4_non_transferability :
+    forall s s' : state, pi : presence, q : principal.
+      reachable s ->
+      step s (Release pi q) s' ->
+      q = pi.subject
+
+  (* Single use, the ledger-visible face of C4. *)
+  goal P4_single_use :
+    forall s s' s'' : state, pi : presence, q q' : principal.
+      reachable s ->
+      step s (Release pi q) s' ->
+      reachable s'' -> s''.h >= s'.h ->
+      (forall x : principal, y : event.
+         s'.released x y = True -> s''.released x y = True) ->
+      not (decide s'' pi q')
+
+  (* --------------------------------------------------------------------- *)
+  (* 9. Small facts that fall out of the definitions                        *)
+  (* --------------------------------------------------------------------- *)
+
+  lemma release_needs_threshold :
+    forall s s' : state, pi : presence, q : principal.
+      step s (Release pi q) s' ->
+      cardinal pi.sigma >= s.threshold pi.ev
+
+  (* With `wf`, a release always carries at least one signature — the k = 0
+     hole is closed by `wf` (D9), not by C1 alone. *)
+  lemma release_needs_a_signature :
+    forall s s' : state, pi : presence, q : principal.
+      wf s -> step s (Release pi q) s' ->
+      cardinal pi.sigma >= 1
+
+  lemma release_marks_history :
+    forall s s' : state, pi : presence, q : principal.
+      step s (Release pi q) s' ->
+      s'.released pi.subject pi.ev = True
+
+  lemma no_release_without_move :
+    forall s s' : state, a : action, p : principal, e : event.
+      step s a s' ->
+      s.released p e = False ->
+      s'.released p e = True ->
+      exists pi : presence, q : principal. a = Release pi q
+
+  (* The checker reads nothing else: a move that touches none of the fields
+     C1-C5 consult cannot change the decision. *)
+  lemma decision_ignores_height :
+    forall s : state, pi : presence, q : principal, t : btime.
+      decide s pi q -> s.tau = t -> decide { s with h = s.h + 1 } pi q
+
+end

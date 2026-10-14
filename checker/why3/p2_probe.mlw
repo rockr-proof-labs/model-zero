@@ -1,0 +1,178 @@
+(* ============================================================================
+   p2_probe.mlw — the probe David Clancy asked for (2 October 2026).
+
+   NOT part of the deliverable. This file exists to record, reproducibly, that
+   P2_liveness as first stated in checker.mlw is VACUOUS rather than merely
+   unproved: adding the single hypothesis `bound >= 0` makes it discharge,
+   because s0 is its own witness.
+
+   Everything below the P2 goal is copied from checker.mlw as it stood before
+   ruling D-N, including the pre-D7 `cred : principal -> status`, so that the
+   probe tests the statement that was actually written.
+
+   Expected result: Valid, in hundredths of a second.
+
+   Run:  why3 prove -P alt-ergo p2_probe.mlw
+         why3 prove -P z3 p2_probe.mlw
+   ============================================================================ *)
+
+module P2Probe
+
+  use int.Int
+  use bool.Bool
+  use set.Fset
+
+  type principal
+  type event
+  type attester
+  type height = int
+  type atime  = int
+  type btime  = int
+
+  type presence = {
+    subject   : principal;
+    ev        : event;
+    signed_at : atime;
+    sigma     : fset attester;
+  }
+
+  type status = Live | Revoked | Expired
+
+  type policy = { delta : int; eps : int }
+
+  (* As it stood before D7: status is a stored field. *)
+  type state = {
+    h           : height;
+    cred        : principal -> status;
+    att_set     : event -> fset attester;
+    threshold   : event -> int;
+    tau         : btime;
+    released    : principal -> event -> bool;
+    pol         : policy;
+  }
+
+  predicate wf (s : state) =
+    (forall e : event. s.threshold e >= 1)
+    /\ s.pol.delta >= 0 /\ s.pol.eps >= 0
+
+  predicate signs attester presence
+
+  predicate c1_signatures (s : state) (pi : presence) =
+    subset pi.sigma (s.att_set pi.ev)
+    /\ cardinal pi.sigma >= s.threshold pi.ev
+    /\ forall a : attester. mem a pi.sigma -> signs a pi
+
+  predicate c2_live (s : state) (pi : presence) =
+    s.cred pi.subject = Live
+
+  predicate c3_fresh (s : state) (pi : presence) =
+    s.tau - s.pol.delta <= pi.signed_at /\ pi.signed_at <= s.tau + s.pol.eps
+
+  predicate c4_unused (s : state) (pi : presence) =
+    s.released pi.subject pi.ev = False
+
+  predicate c5_credit (pi : presence) (q : principal) =
+    q = pi.subject
+
+  predicate decide (s : state) (pi : presence) (q : principal) =
+    c1_signatures s pi /\ c2_live s pi /\ c3_fresh s pi
+    /\ c4_unused s pi /\ c5_credit pi q
+
+  type action =
+    | Revoke    principal
+    | Expire    principal
+    | Rotate    event (fset attester)
+    | SetPolicy policy
+    | Advance   btime
+    | Release   presence principal
+
+  inductive step state action state =
+
+    | step_revoke :
+        forall s : state, p : principal.
+          step s (Revoke p)
+            { s with cred = (fun x -> if x = p then Revoked else s.cred x) }
+
+    | step_expire :
+        forall s : state, p : principal.
+          step s (Expire p)
+            { s with cred = (fun x -> if x = p then Expired else s.cred x) }
+
+    | step_rotate :
+        forall s : state, e : event, newset : fset attester.
+          step s (Rotate e newset)
+            { s with att_set = (fun x -> if x = e then newset else s.att_set x) }
+
+    | step_setpolicy :
+        forall s : state, p : policy.
+          p.delta >= 0 -> p.eps >= 0 ->
+          step s (SetPolicy p) { s with pol = p }
+
+    | step_advance :
+        forall s : state, t : btime.
+          t >= s.tau ->
+          step s (Advance t) { s with h = s.h + 1; tau = t }
+
+    | step_release :
+        forall s : state, pi : presence, q : principal.
+          decide s pi q ->
+          step s (Release pi q)
+            { s with released = (fun x y ->
+                       if x = pi.subject then
+                         (if y = pi.ev then True else s.released x y)
+                       else s.released x y) }
+
+  predicate initial (s : state) =
+    wf s /\ s.h >= 0
+    /\ (forall p : principal, e : event. s.released p e = False)
+
+  inductive reachable state =
+    | reach_init : forall s : state. initial s -> reachable s
+    | reach_step : forall s s' : state, a : action.
+        reachable s -> step s a s' -> reachable s'
+
+  predicate submitted presence principal height
+
+  function bound : int
+
+  (* ======================================================================
+     THE PROBE.
+
+     This is P2_liveness exactly as first written, with ONE hypothesis added:
+     `bound >= 0`. If it discharges, the original goal was vacuous — it
+     follows from its own antecedent, with s0 as the witness:
+
+       reachable s0                      -- given
+       s0.h = h0 <= h0 + bound           -- needs bound >= 0, and only that
+       decide s0 pi q  =>  step_release  -- given, by the release rule
+
+     The statement asserts that a release step is POSSIBLE from some reachable
+     state in the window. It never asserts that a release OCCURS. Possibility
+     is not eventuality, and "eventually" is a property of executions, which
+     no predicate over a set of states can express.
+     ====================================================================== *)
+  goal P2_probe_vacuous :
+    forall s0 : state, pi : presence, q : principal, h0 : height.
+      bound >= 0 ->
+      reachable s0 ->
+      s0.h = h0 ->
+      submitted pi q h0 ->
+      decide s0 pi q ->
+      (forall s : state. reachable s -> s.h >= h0 -> s.h <= h0 + bound ->
+         s.cred pi.subject = Live /\ s.pol = s0.pol) ->
+      exists s s' : state.
+        reachable s /\ s.h <= h0 + bound /\ step s (Release pi q) s'
+
+  (* The same point with the antecedent stripped to the three hypotheses that
+     actually do the work. If this also discharges, nothing in the delivery
+     apparatus (`submitted`, the stability hypothesis) was ever load-bearing. *)
+  goal P2_probe_minimal :
+    forall s0 : state, pi : presence, q : principal, h0 : height.
+      bound >= 0 ->
+      reachable s0 ->
+      s0.h = h0 ->
+      decide s0 pi q ->
+      exists s s' : state.
+        reachable s /\ s.h <= h0 + bound /\ step s (Release pi q) s'
+
+end

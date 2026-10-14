@@ -1,0 +1,292 @@
+(* ============================================================================
+   checker_test.mlw — a sanity check for the decision predicate.
+
+   Companion to checker.mlw. The Cooking Workshop example made concrete: five
+   people, four attesters, one event, one page of the chain.
+
+   These are the ONLY goals in the task meant to be PROVED. They are a smoke
+   test: they show the five conditions behave as intended on a case that can be
+   computed by hand.
+
+   STANDALONE ON PURPOSE. This file does not `use` checker.mlw: it repeats the
+   definitions with CONCRETE types (identifiers are `int`, the signing set is a
+   `list`) so the prover can decide equality and compute `length`. checker.mlw
+   keeps abstract types and `fset`, which are right for the statement but give
+   a prover nothing to compute with. The conditions are otherwise identical,
+   and `distinct` below stands in for what `fset` gives free.
+
+   Carries ruling D7 (2 October 2026): expiry is derived from the register and
+   the block clock, not stored. `test_omar_hold` exercises it.
+
+   Run:  why3 prove -P alt-ergo checker_test.mlw
+   ============================================================================ *)
+
+module CheckerTest
+
+  use int.Int
+  use bool.Bool
+  use list.List
+  use list.Mem
+  use list.Length
+
+  (* ---- identifiers, concrete for the test --------------------------------- *)
+  type principal = int
+  type event     = int
+  type attester  = int
+
+  type status = Live | Revoked | Expired
+
+  (* D7: what the register stores. *)
+  type credential = { is_revoked : bool; expires : int }
+
+  type presence = {
+    subject   : principal;
+    ev        : event;
+    signed_at : int;
+    sigma     : list attester;
+  }
+
+  type policy = { delta : int; eps : int }
+
+  type state = {
+    h         : int;
+    cred      : principal -> credential;
+    att_set   : event -> list attester;
+    threshold : event -> int;
+    tau       : int;
+    released  : principal -> event -> bool;
+    pol       : policy;
+  }
+
+  (* D7: status is read, not stored. *)
+  function status_of (s : state) (p : principal) : status =
+    let c = s.cred p in
+    if c.is_revoked = True then Revoked
+    else if c.expires <= s.tau then Expired
+    else Live
+
+  (* ---- the five conditions ------------------------------------------------ *)
+
+  predicate all_authorised (sg : list attester) (auth : list attester) =
+    forall a : attester. mem a sg -> mem a auth
+
+  (* No attester may be counted twice. checker.mlw gets this free from `fset`;
+     a list does not, and without it a note signed {Tim, Tim} has length 2 >=
+     k = 2 and passes the threshold with ONE attester. *)
+  predicate distinct (l : list attester) =
+    match l with
+    | Nil      -> true
+    | Cons x r -> not (mem x r) /\ distinct r
+    end
+
+  predicate c1_signatures (s : state) (pi : presence) =
+    all_authorised pi.sigma (s.att_set pi.ev)
+    /\ distinct pi.sigma
+    /\ length pi.sigma >= s.threshold pi.ev
+
+  predicate c2_live (s : state) (pi : presence) =
+    status_of s pi.subject = Live
+
+  predicate c3_fresh (s : state) (pi : presence) =
+    s.tau - s.pol.delta <= pi.signed_at /\ pi.signed_at <= s.tau + s.pol.eps
+
+  predicate c4_unused (s : state) (pi : presence) =
+    s.released pi.subject pi.ev = False
+
+  predicate c5_credit (pi : presence) (q : principal) =
+    q = pi.subject
+
+  predicate decide (s : state) (pi : presence) (q : principal) =
+    c1_signatures s pi /\ c2_live s pi /\ c3_fresh s pi
+    /\ c4_unused s pi /\ c5_credit pi q
+
+  (* ---- the people --------------------------------------------------------- *)
+  constant hugo : principal = 1
+  constant ines : principal = 2
+  constant yann : principal = 3
+  constant zara : principal = 4
+  constant omar : principal = 5
+
+  (* ---- the attesters ------------------------------------------------------ *)
+  constant tim  : attester = 10
+  constant kim  : attester = 11
+  constant sam  : attester = 12
+  constant ravi : attester = 13
+
+  (* ---- the event ---------------------------------------------------------- *)
+  constant ck9 : event = 100
+
+  constant staff : list attester = Cons tim (Cons kim (Cons sam (Cons ravi Nil)))
+
+  (* ---- the chain at page 100, clock 1000 ---------------------------------- *)
+
+  (* Zara was revoked on page 92. Omar's credential ran out at 900, before the
+     current clock — nobody revoked it; it simply expired (D7). *)
+  function reg (p : principal) : credential =
+    if p = zara then { is_revoked = True;  expires = 2000 }
+    else if p = omar then { is_revoked = False; expires = 900 }
+    else { is_revoked = False; expires = 2000 }
+
+  function att (e : event) : list attester =
+    if e = ck9 then staff else Nil
+
+  (* k = 2, and >= 1 everywhere, so `wf` holds (D9). *)
+  function thr (e : event) : int =
+    if e = ck9 then 2 else 1
+
+  (* Yann was paid on page 88. *)
+  function hist (p : principal) (e : event) : bool =
+    if p = yann /\ e = ck9 then True else False
+
+  (* Window 1000 - 300 .. 1000 + 60  =  700 .. 1060 *)
+  constant pol100 : policy = { delta = 300; eps = 60 }
+
+  constant s100 : state = {
+    h = 100; cred = reg; att_set = att; threshold = thr;
+    tau = 1000; released = hist; pol = pol100
+  }
+
+  (* ---- the notes ---------------------------------------------------------- *)
+
+  constant pi_hugo : presence = {
+    subject = hugo; ev = ck9; signed_at = 810;
+    sigma = Cons tim (Cons kim Nil)
+  }
+
+  constant pi_yann : presence = {
+    subject = yann; ev = ck9; signed_at = 870;
+    sigma = Cons tim (Cons sam (Cons ravi Nil))
+  }
+
+  constant pi_zara : presence = {
+    subject = zara; ev = ck9; signed_at = 900;
+    sigma = Cons sam (Cons ravi Nil)
+  }
+
+  constant pi_omar : presence = {
+    subject = omar; ev = ck9; signed_at = 880;
+    sigma = Cons kim (Cons ravi Nil)
+  }
+
+  (* ======================================================================== *)
+  (*  RELEASE                                                                 *)
+  (* ======================================================================== *)
+
+  (* Hugo: two authorised, distinct signatures; live credential; 810 inside
+     700..1060; never paid; credited to himself. All five hold. *)
+  goal test_hugo_release :
+    decide s100 pi_hugo hugo
+
+  (* ======================================================================== *)
+  (*  HOLD — one goal per condition, so a failure is diagnostic               *)
+  (* ======================================================================== *)
+
+  (* Yann: everything passes except C4 — page 88 recorded (Yann, CK9) = PAID.
+     This is the replay case: the note is genuine, it has simply been used. *)
+  goal test_yann_hold :
+    not (decide s100 pi_yann yann)
+
+  goal test_yann_fails_only_c4 :
+    c1_signatures s100 pi_yann
+    /\ c2_live s100 pi_yann
+    /\ c3_fresh s100 pi_yann
+    /\ not (c4_unused s100 pi_yann)
+
+  (* Zara: revoked on page 92. She really attended and her signatures are real;
+     C2 alone refuses her. *)
+  goal test_zara_hold :
+    not (decide s100 pi_zara zara)
+
+  goal test_zara_fails_only_c2 :
+    c1_signatures s100 pi_zara
+    /\ not (c2_live s100 pi_zara)
+    /\ c3_fresh s100 pi_zara
+    /\ c4_unused s100 pi_zara
+
+  (* Omar: D7 in action. Nobody revoked him; his credential's expiry date
+     (900) is behind the block clock (1000), so status_of reads Expired and
+     C2 fails. No `Expire` move was ever taken — the clock did it. *)
+  goal test_omar_hold :
+    not (decide s100 pi_omar omar)
+
+  goal test_omar_is_expired_not_revoked :
+    status_of s100 omar = Expired
+    /\ status_of s100 zara = Revoked
+    /\ status_of s100 hugo = Live
+
+  (* A stolen note redirected: Hugo's genuine evidence, credited to Mallory.
+     C1-C4 all pass; C5 alone refuses it. *)
+  constant mallory : principal = 9
+
+  goal test_wrong_account_hold :
+    not (decide s100 pi_hugo mallory)
+
+  goal test_wrong_account_fails_only_c5 :
+    c1_signatures s100 pi_hugo
+    /\ c2_live s100 pi_hugo
+    /\ c3_fresh s100 pi_hugo
+    /\ c4_unused s100 pi_hugo
+    /\ not (c5_credit pi_hugo mallory)
+
+  (* One corrupt attester acting alone: 1 < k = 2. *)
+  constant pi_one_sig : presence = {
+    subject = ines; ev = ck9; signed_at = 845; sigma = Cons tim Nil
+  }
+
+  goal test_single_signature_hold :
+    not (decide s100 pi_one_sig ines)
+
+  (* An outsider signs: Zoe works the Lyon football match, not CK9. Two
+     signatures, but one of them carries no authority for this event. *)
+  constant zoe : attester = 99
+
+  constant pi_outsider : presence = {
+    subject = ines; ev = ck9; signed_at = 845; sigma = Cons tim (Cons zoe Nil)
+  }
+
+  goal test_outsider_signature_hold :
+    not (decide s100 pi_outsider ines)
+
+  (* The same attester signing twice. Both entries are authorised and length
+     is 2 >= k, so WITHOUT `distinct` this would clear the threshold on one
+     attester — the whole point of k-of-n defeated. The model gets this free
+     from `fset`; an implementation receiving a LIST over the wire must
+     de-duplicate before counting. *)
+  constant pi_dup : presence = {
+    subject = ines; ev = ck9; signed_at = 845; sigma = Cons tim (Cons tim Nil)
+  }
+
+  goal test_duplicate_signer_hold :
+    not (decide s100 pi_dup ines)
+
+  goal test_duplicate_fails_on_distinct :
+    not (distinct pi_dup.sigma)
+
+  (* Evidence from outside the window: 610 < 700. *)
+  constant pi_stale : presence = {
+    subject = ines; ev = ck9; signed_at = 610;
+    sigma = Cons tim (Cons kim Nil)
+  }
+
+  goal test_stale_hold :
+    not (decide s100 pi_stale ines)
+
+  (* And from the far side: 1100 > 1060. A timestamp well ahead of block time
+     is not a fast clock, it is a fabrication. *)
+  constant pi_future : presence = {
+    subject = ines; ev = ck9; signed_at = 1100;
+    sigma = Cons tim (Cons kim Nil)
+  }
+
+  goal test_future_hold :
+    not (decide s100 pi_future ines)
+
+  (* ======================================================================== *)
+  (*  The state itself is well-formed                                         *)
+  (* ======================================================================== *)
+
+  goal test_wf :
+    (forall e : event. s100.threshold e >= 1)
+    /\ s100.pol.delta >= 0 /\ s100.pol.eps >= 0
+
+end
